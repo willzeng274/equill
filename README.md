@@ -67,3 +67,15 @@ To incorporate the project, we utilised the Cohere language model, and we implem
 - Ability to give multiple different replacements and the user can choose what they prefer
 - Make UI available outside of the side panel: highlighting text and allow the user to hover over the text, choosing what to replace
 - Premium features (likely related to customization, more tokens, etc)
+
+## Cohere compatibility (1.1.0)
+
+The extension now uses Cohere's `/v2/chat` API. It refreshes the model catalogue hourly while the panel is open and selects the newest non-deprecated, non-fine-tuned general-purpose model in the dated Command A, A+, R, R+, or R7B families. Specialized translation/reasoning/vision models and undated legacy aliases are excluded. If discovery is unavailable, it tries known supported models starting with `command-a-plus-05-2026`. Model-specific access/retirement errors fall back to the next candidate; authentication, quota, and input errors are shown to the user.
+
+Responses use JSON mode and are validated before rendering. Requests time out after 60 seconds; newer input cancels older work. Scores are calculated locally as `max(1, 100 - 2 × suggestion count)`. Provider usage and pricing depend on the selected model and the user's Cohere account.
+
+### Tests
+
+Run `npm ci` and `npm test` with Node.js 22 or newer. Tests cover model discovery, pagination, fallback, error handling, response validation, panel rendering, request races, and safe rendering of markup. They use simulated Cohere responses and do not require a key. A real-account smoke test still requires a valid Cohere API key.
+
+To package for the Chrome Web Store, ZIP the contents of `src/`, with `manifest.json` at the ZIP root. Do not include `node_modules`, tests, or credentials.
