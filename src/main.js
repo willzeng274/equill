@@ -7,33 +7,26 @@ let globalStorage = {
 	temperature: 0.3
 };
 
-function save(e) {
-	e.preventDefault();
-	const apiKey = document.getElementById("apiKey").value;
-	fetch("https://api.cohere.com/v1/check-api-key", {
-		method: "POST",
-		headers: {
-			accept: "application/json",
-			"content-type": "application/json",
-			Authorization: `bearer ${apiKey}`,
-		},
-		body: "",
-	})
-		.then((res) => res.json())
-		.then((res) => {
-			// alert(JSON.stringify(res));
-			// console.log(res);
-			const msg = document.getElementById("errorMessage");
-			if (res.valid) {
-				chrome.storage.local.set({ apiKey }).then(load);
-				globalStorage.apiKey = apiKey;
-				msg.classList.add("max-h-0", "opacity-0", "hidden");
-				msg.classList.remove("max-h-40", "opacity-100", "flex");
-			} else {
-				msg.classList.remove("max-h-0", "opacity-0", "hidden");
-				msg.classList.add("max-h-40", "opacity-100", "flex");
-			}
-		});
+async function save(e) {
+ e.preventDefault();
+ const apiKey = document.getElementById("apiKey").value.trim();
+ const msg = document.getElementById("errorMessage");
+ const button = document.getElementById("btn");
+ button.disabled = true;
+ try {
+  if (!apiKey) throw new Error("Enter your Cohere API key.");
+  const result = await CohereAPI.request('/v1/check-api-key', apiKey, { body: {} });
+  if (!result.valid) throw new Error("Invalid Cohere API key.");
+  await chrome.storage.local.set({ apiKey });
+  globalStorage.apiKey = apiKey;
+  CohereAPI.reset();
+  msg.classList.add("hidden");
+  await load();
+ } catch (error) {
+  msg.textContent = error.message;
+  msg.classList.remove("max-h-0", "opacity-0", "hidden");
+  msg.classList.add("max-h-40", "opacity-100", "flex");
+ } finally { button.disabled = false; }
 }
 
 function readTextFile(file) {
@@ -109,8 +102,15 @@ function toggleSettings() {
 }
 
 function logout() {
-	chrome.storage.local.remove("apiKey");
-	showSetup();
+ activeRequest?.abort();
+ activeRequest = null;
+ globalStorage.apiKey = "";
+ CohereAPI.reset();
+ chrome.storage.local.remove("apiKey");
+ document.getElementById("apiKey").value = "";
+ document.getElementById("loading-overlay").classList.add("hidden");
+ document.getElementById("spinner").classList.add("hidden");
+ showSetup();
 }
 
 function showDashboard() {
@@ -127,30 +127,13 @@ function showSetup() {
 	document.getElementById("setup").classList.add("flex");
 }
 
-function load() {
-	document.getElementById("tempDisplay").innerText = 0.3;
-
-	chrome.storage.local.get("apiKey").then(function (data) {
-		if (typeof data["apiKey"] != "undefined") {
-			globalStorage.apiKey = data["apiKey"];
-			showDashboard();
-			// document.getElementById("apiKey").value = data["apiKey"];
-		} else {
-			showSetup();
-		}
-	});
-	chrome.storage.local.get("country").then(function (data) {
-		globalStorage.country = data["country"];
-		document.getElementById("country").value = data["country"];
-	});
-	chrome.storage.local.get("religion").then(function (data) {
-		globalStorage.religion = data["religion"];
-		document.getElementById("religion").value = data["religion"];
-	});
-	chrome.storage.local.get("language").then(function (data) {
-		globalStorage.language = data["language"];
-		document.getElementById("language").value = data["language"];
-	})
+async function load() {
+ const defaults = { apiKey: "", country: "International", religion: "Not Specified", language: "en-US" };
+ const data = await chrome.storage.local.get(defaults);
+ Object.assign(globalStorage, data);
+ for (const key of ["country", "religion", "language"]) document.getElementById(key).value = data[key];
+ document.getElementById("tempDisplay").innerText = globalStorage.temperature;
+ if (data.apiKey) showDashboard(); else showSetup();
 }
 
 /**
@@ -250,130 +233,97 @@ function getPrompt(language, country, religion) {
 	return prompt;
 }
 
-function getResults(text) {
-	const apiKey = globalStorage.apiKey;
-	if (apiKey === "") return;
-	document.getElementById("loading-overlay").classList.remove("hidden");
-	document.getElementById("spinner").classList.remove("hidden");
-	document.getElementById("score").innerText = "";
-	fetch("https://api.cohere.com/v1/chat", {
-		method: "POST",
-		headers: {
-			accept: "application/json",
-			"content-type": "application/json",
-			Authorization: `bearer ${apiKey}`,
-		},
-		body: JSON.stringify({
-			chat_history: [],
-			message: `## Instructions
-${getPrompt(globalStorage.language, globalStorage.country, globalStorage.religion)}
-Please also ONLY respond in JSON with no markup syntax and external text. Your response must begin with '{' and end with '}'.
-The schema of the JSON response and the text is given below:
-
-## Response JSON Schema
-schema {
-  originalText: string, // the original text
-  inclusiveText: string, // the modified inclusive text
-  nonInclusiveTexts: Array<{
-    text: string, // the part of the text that is not inclusive
-    reason: string, // the reason why this part of the text is not inclusive
-    replacement: string, // suggested text to replace the not-inclusive text
-  }>
+function renderHighlights(element, text, replacements) {
+ const ranges = [];
+ for (const replacement of replacements) {
+  if (!replacement) continue;
+  const start = text.indexOf(replacement);
+  const end = start + replacement.length;
+  if (start >= 0 && !ranges.some(range => start < range.end && end > range.start)) ranges.push({ start, end });
+ }
+ ranges.sort((a, b) => a.start - b.start);
+ element.replaceChildren();
+ let position = 0;
+ for (const range of ranges) {
+  element.append(document.createTextNode(text.slice(position, range.start)));
+  const span = document.createElement("span");
+  span.className = "highlight-final";
+  span.textContent = text.slice(range.start, range.end);
+  element.append(span);
+  position = range.end;
+ }
+ element.append(document.createTextNode(text.slice(position)));
 }
 
-## Input Text
-${text}`,
-			prompt_truncation: "OFF",
-			connectors: [],
-			temperature: globalStorage.temperature,
-			seed: globalStorage.seed === 0 ? undefined : globalStorage.seed,
-			model: "command-r-plus",
-		}),
-	})
-		.then((res) => res.json())
-		.then((res) => {
-			// console.log(res);
-			const obj = JSON.parse(res.text);
-			document.getElementById("results").innerText = obj.inclusiveText;
-			//document.getElementById("suggestions").innerText = "Detected Word: " + JSON.stringify(obj.nonInclusiveTexts[0].text) + "\n\n" + "Reason for Change: " + obj.nonInclusiveTexts[0].reason + "\n\n" + "Replacment: " + JSON.stringify(obj.nonInclusiveTexts[0].replacement);
-			//document.getElementById("suggestions").innerText = res.text
+let activeRequest = null;
 
-			// console.log(obj);
-			// console.log(obj.nonInclusiveTexts);
-
-			const container = document.getElementById("suggestions-container");
-			container.innerHTML = ``;
-
-			let highlightedOriginal = obj.originalText;
-			let highlightedFinal = obj.originalText;
-			let highlightedResult = obj.inclusiveText;
-
-			obj.nonInclusiveTexts.forEach((item, index) => {
-				const newDiv = document.createElement("div");
-
-				newDiv.classList.add("rounded-lg", "bg-white/10", "px-3", "py-2", "text-sm", "font-medium", "w-full");
-
-				const originalHighlight = `<span id="equill-sp-${index}" class="highlight-original" data-original="${item.text}" data-replacement="${item.replacement || item.text}">${item.text}</span>`;
-				const finalHighlight = `<span class="highlight-final">${item.replacement}</span>`;
-
-				highlightedOriginal = highlightedFinal.replace(item.text, originalHighlight);
-				highlightedFinal = highlightedFinal.replace(item.text, item.replacement);
-				highlightedResult = highlightedResult.replace(item.replacement, finalHighlight);
-
-				newDiv.innerHTML = `<strong>Text:</strong> ${highlightedOriginal}<br><br>
-											<strong>Reason:</strong> ${item.reason}<br><br>
-											<strong>Replacement:</strong> ${item.replacement || "N/A"}`;
-
-				container.appendChild(newDiv);
-
-				// console.log(item, document.getElementById(`equill-sp-${index}`));
-				if (document.getElementById(`equill-sp-${index}`) !== null) {
-					document.getElementById(`equill-sp-${index}`).addEventListener("mouseenter", hoverIn);
-					document.getElementById(`equill-sp-${index}`).addEventListener("mouseleave", hoverOut);
-				}
-			});
-
-			document.getElementById("results").innerHTML = highlightedResult;
-
-			if (obj.nonInclusiveTexts.length === 0) {
-				container.innerHTML = `<div id="suggestions" class="rounded-lg bg-white/10 px-3 py-2 text-sm font-medium w-full">No suggestions.</div>`;
-			}
-
-			document.getElementById("loading-overlay").classList.add("hidden");
-
-			fetch("https://api.cohere.com/v1/chat", {
-				method: "POST",
-				headers: {
-					accept: "application/json",
-					"content-type": "application/json",
-					Authorization: `bearer ${apiKey}`,
-				},
-				body: JSON.stringify({
-					chat_history: res.chat_history,
-					message: `Assuming that the user starts off with a 100. Only remove 2 points for every value in the array. Based on the original text, give a rating based from 1-100 on the inclusivity of the input. For example, if there are 3 instances where text had to be replaced give it a score of 92.Please only output a single number ranging 1-100.`,
-					prompt_truncation: "OFF",
-					connectors: [],
-					temperature: 0.3,
-					model: "command-r-plus",
-				}),
-			})
-				.then((res) => res.json())
-				.then((res) => {
-					// alert("Your score is " + res.text);
-					document.getElementById("score").innerText = res.text;
-					document.getElementById("spinner").classList.add("hidden");
-				});
-		});
+async function getResults(text) {
+ if (!globalStorage.apiKey || !text?.trim()) return;
+ activeRequest?.abort();
+ const controller = new AbortController();
+ activeRequest = controller;
+ const overlay = document.getElementById("loading-overlay");
+ const spinner = document.getElementById("spinner");
+ const results = document.getElementById("results");
+ const container = document.getElementById("suggestions-container");
+ overlay.classList.remove("hidden");
+ spinner.classList.remove("hidden");
+ document.getElementById("score").textContent = "";
+ container.replaceChildren();
+ results.textContent = "";
+ try {
+  const obj = await CohereAPI.rewrite({
+   apiKey: globalStorage.apiKey,
+   instructions: getPrompt(globalStorage.language, globalStorage.country, globalStorage.religion),
+   text, temperature: globalStorage.temperature, seed: globalStorage.seed,
+   signal: controller.signal,
+  });
+  if (activeRequest !== controller) return;
+  renderHighlights(results, obj.inclusiveText, obj.nonInclusiveTexts.map(item => item.replacement));
+  for (const item of obj.nonInclusiveTexts) {
+   const card = document.createElement("div");
+   card.className = "rounded-lg bg-white/10 px-3 py-2 text-sm font-medium w-full";
+   for (const [label, value] of [["Text", item.text], ["Reason", item.reason], ["Replacement", item.replacement || "N/A"]]) {
+    const row = document.createElement("p");
+    const title = document.createElement("strong");
+    title.textContent = label + ": ";
+    row.append(title);
+    if (label === "Text") {
+     const span = document.createElement("span");
+     span.className = "highlight-original";
+     span.textContent = value;
+     span.setAttribute("data-original", value);
+     span.setAttribute("data-replacement", item.replacement || value);
+     span.addEventListener("mouseenter", hoverIn);
+     span.addEventListener("mouseleave", hoverOut);
+     row.append(span);
+    } else { row.append(document.createTextNode(value)); }
+    card.append(row);
+   }
+   container.append(card);
+  }
+  if (!obj.nonInclusiveTexts.length) container.textContent = "No suggestions.";
+  document.getElementById("score").textContent = Math.max(1, 100 - obj.nonInclusiveTexts.length * 2);
+  results.title = "Model: " + obj.model;
+ } catch (error) {
+  if (activeRequest === controller && !controller.signal.aborted) results.textContent = error.message;
+ } finally {
+  if (activeRequest === controller) {
+   overlay.classList.add("hidden");
+   spinner.classList.add("hidden");
+   activeRequest = null;
+  }
+ }
 }
 
 chrome.runtime.onMessage.addListener(function (request, sender) {
 	// console.log(request.message, sender);
-	console.log(request.message);
+	// Keep selected text out of diagnostic logs.
 	const event = JSON.parse(request.message);
 	if (event.event !== "SELECTED") return;
 	const text = event.body;
 	// check if the highlighted text is already prompted
-	if (display.innerText === text) return;
+	if (activeRequest && display.innerText === text) return;
 	display.innerText = text;
 	getResults(text);
 });
@@ -406,12 +356,12 @@ function gotoCohere() {
 }
 
 function changeSeed(e) {
-	globalStorage.seed = e.target.value;
+	globalStorage.seed = Number(e.target.value);
 }
 
 function changeTemperature(e) {
 	document.getElementById("tempDisplay").innerText = e.target.value;
-	globalStorage.temperature = e.target.value;
+	globalStorage.temperature = Number(e.target.value);
 }
 
 function changeCountry(e) {
@@ -436,12 +386,12 @@ function hoverIn() {
 	const replacementText = this.getAttribute("data-replacement");
 	this.classList.remove("highlight-original");
 	this.classList.add("highlight-final");
-	this.innerText = replacementText;
+	this.textContent = replacementText;
 }
 
 function hoverOut() {
 	const originalText = this.getAttribute("data-original");
 	this.classList.add("highlight-original");
 	this.classList.remove("highlight-final");
-	this.innerText = originalText;
+	this.textContent = originalText;
 }
